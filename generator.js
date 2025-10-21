@@ -173,23 +173,29 @@ export function generateDataset(perClass=300, opts={brightness:0, shadow:20, noi
         xs.push(x); ys.push(y); previews.push({cls:c, data:preview});
       }
     }
+
     const X = tf.concat(xs,0);
     const Y = tf.concat(ys,0);
     xs.forEach(t=>t.dispose()); ys.forEach(t=>t.dispose());
 
     const N = X.shape[0];
-    const idx = tf.util.createShuffledIndices(N);
-    const split = Math.floor(N * (1 - testPct));
+    // 🔧 FIX: оборачиваем индексы в тензор int32
+    const idxArray = tf.util.createShuffledIndices(N);
+    const idxT = tf.tensor1d(Array.from(idxArray), 'int32');
 
-    const Xsh = tf.gather(X, idx);
-    const Ysh = tf.gather(Y, idx);
+    const split = Math.floor(N * (1 - testPct));
+    const Xsh = tf.gather(X, idxT);
+    const Ysh = tf.gather(Y, idxT);
 
     const Xtrain = Xsh.slice([0,0,0,0], [split, IMG.W, IMG.H, 3]);
     const Ytrain = Ysh.slice([0,0],     [split, CLASSES.length]);
     const Xtest  = Xsh.slice([split,0,0,0], [N - split, IMG.W, IMG.H, 3]);
     const Ytest  = Ysh.slice([split,0],     [N - split, CLASSES.length]);
 
-    // X/Y/Xsh/Ysh будут удалены tidy; Xtrain/Ytrain/Xtest/Ytest вернутся живыми
+    // временные тензоры будут очищены tidy
+    idxT.dispose();
+    X.dispose(); Y.dispose(); Xsh.dispose(); Ysh.dispose();
+
     return { Xtrain, Ytrain, Xtest, Ytest, previews };
   });
 }
