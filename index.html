@@ -2,51 +2,153 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8" />
-  <title>Garbage Classifier — Pretrained ResNet (TF.js)</title>
+  <title>Eco-Object Detector (tf.js)</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:24px;color:#0f172a}
+    :root{--bg:#f8fafc;--muted:#6b7280}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:24px;background:var(--bg);color:#0f172a}
     h1{margin:0 0 8px}
-    .card{border:1px solid #e5e7eb;border-radius:14px;padding:16px;margin:12px 0}
-    .row{display:flex;gap:16px;flex-wrap:wrap}
+    .muted{color:var(--muted)}
+    .row{display:flex;flex-wrap:wrap;gap:16px}
+    .card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:16px}
     .col{flex:1 1 320px}
-    table{width:100%;border-collapse:collapse}
-    th,td{border-top:1px solid #eee;padding:8px;text-align:left}
-    img,canvas{border:1px solid #e5e7eb;border-radius:8px;background:#fff}
+    label{font-weight:600}
+    input[type="number"]{width:90px}
+    input[type="range"]{width:160px}
     button{background:#2563eb;color:#fff;border:0;border-radius:10px;padding:10px 14px;cursor:pointer}
-    #log{white-space:pre-wrap;background:#0f172a;color:#e5e7eb;font-family:ui-monospace,Consolas,monospace;padding:10px;border-radius:8px;max-height:200px;overflow:auto}
+    button:disabled{opacity:.6;cursor:not-allowed}
+    table{width:100%;border-collapse:collapse;font-size:14px}
+    th,td{border-top:1px solid #eee;padding:8px;text-align:left}
+    canvas, .preview{border:1px solid #e5e7eb;border-radius:8px;background:#fff}
+    .pill{display:inline-block;background:#ecfccb;border:1px solid #d9f99d;color:#166534;border-radius:999px;padding:2px 8px;font-size:12px}
+    #log{white-space:pre-wrap;background:#0f172a;color:#e5e7eb;font-family:ui-monospace,Consolas,monospace;padding:10px;border-radius:8px;max-height:220px;overflow:auto}
   </style>
+  <!-- libs -->
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <!-- опционально: mobilenet для transfer learning -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2.1.0"></script>
 </head>
 <body>
-  <h1>Garbage Classifier — Pretrained ResNet (TF.js)</h1>
+  <h1>Eco-Object Detector</h1>
+  <div class="muted">
+    Классификация объектов на земле: <span class="pill">Leaf</span> • <span class="pill">Plastic</span> • <span class="pill">Stone</span>
+  </div>
 
   <div class="card">
     <div class="row">
       <div class="col">
-        <h3>1) Модель</h3>
-        <button id="btnLoad">Загрузить модель</button>
-        <div id="modelInfo"></div>
+        <h3>1) Генерация датасета</h3>
+        <div><label>Изображение:</label> <span>96×96 RGB</span></div>
+        <div style="margin-top:6px">
+          <label>Samples per class:</label>
+          <input type="number" id="perClass" value="300" min="30" max="3000" step="10" />
+        </div>
+        <div style="margin-top:6px">
+          <label>Brightness:</label>
+          <input type="range" id="brightness" min="-50" max="50" value="0" />
+          <span id="bVal">0</span>
+        </div>
+        <div style="margin-top:6px">
+          <label>Shadow:</label>
+          <input type="range" id="shadow" min="0" max="80" value="20" />
+          <span id="sVal">20</span>
+        </div>
+        <div style="margin-top:6px">
+          <label>Noise:</label>
+          <input type="range" id="noise" min="0" max="40" value="8" />
+          <span id="nVal">8</span>
+        </div>
+        <div style="margin-top:12px">
+          <button id="btnGen">Сгенерировать датасет</button>
+        </div>
+        <div class="muted" style="margin-top:8px">
+          Сбалансированный датасет: равное число примеров для Leaf/Plastic/Stone
+        </div>
+      </div>
+
+      <div class="col">
+        <h3>2) Модель</h3>
+        <div style="margin-bottom:6px">
+          <label><input type="radio" name="mdl" value="cnn" checked /> Small CNN</label>
+          &nbsp;&nbsp;
+          <label><input type="radio" name="mdl" value="tl" /> Transfer (MobileNet)</label>
+        </div>
+        <div>
+          <label>Epochs:</label> <input type="number" id="epochs" value="12" min="1" max="100" />
+          &nbsp; <label>Batch:</label> <input type="number" id="batch" value="64" min="8" max="256" step="8" />
+        </div>
+        <div style="margin-top:8px">
+          <button id="btnBuild">Построить модель</button>
+          <button id="btnTrain" disabled>Обучить</button>
+          <button id="btnEval" disabled>Оценить</button>
+        </div>
+        <div style="margin-top:8px">
+          <canvas id="trainChart" width="420" height="220"></canvas>
+          <div class="muted">Графики обучения (loss/acc)</div>
+        </div>
+      </div>
+
+      <div class="col">
+        <h3>3) Инференс</h3>
+        <div class="row" style="gap:12px">
+          <div>
+            <canvas id="preview" width="192" height="192"></canvas>
+            <div class="muted">Случайный train-пример</div>
+          </div>
+          <div>
+            <input type="file" id="fileInput" accept="image/*" />
+            <div style="margin-top:6px">
+              <img id="uploadPreview" class="preview" width="192" height="192" />
+            </div>
+            <div style="margin-top:6px">
+              <button id="btnPredict" disabled>Predict uploaded</button>
+            </div>
+          </div>
+        </div>
+        <div style="margin-top:8px">
+          <table>
+            <thead><tr><th>Класс</th><th>Вероятность</th></tr></thead>
+            <tbody id="probs"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:12px">
+      <div class="col">
+        <h3>Confusion Matrix (test)</h3>
+        <canvas id="cmChart" width="420" height="300"></canvas>
+      </div>
+      <div class="col">
+        <h3>Логи</h3>
         <div id="log"></div>
       </div>
       <div class="col">
-        <h3>2) Фото для предсказания</h3>
-        <input type="file" id="file" accept="image/*" />
-        <div style="margin-top:8px"><img id="img" width="224" height="224"/></div>
-        <div style="margin-top:8px">
-          <button id="btnPredict" disabled>Predict</button>
-        </div>
-      </div>
-      <div class="col">
-        <h3>3) Результат</h3>
-        <table>
-          <thead><tr><th>Класс</th><th>Вероятность</th></tr></thead>
-          <tbody id="probs"></tbody>
-        </table>
+        <h3>Классы</h3>
+        <ul style="margin-top:0">
+          <li><b>Leaf</b> — зеленоватые органические контуры с «жилами», неровные края</li>
+          <li><b>Plastic</b> — яркие/гладкие пятна с бликoм, прямые/рваные края</li>
+          <li><b>Stone</b> — серо-коричневые неровные формы с зернистой текстурой</li>
+        </ul>
       </div>
     </div>
   </div>
 
-  <script type="module" src="./infer.js"></script>
+  <!-- Глобальные ловцы ошибок в "Логи" -->
+  <script>
+    window.addEventListener('error', (e) => {
+      const log = document.getElementById('log');
+      if (log) log.textContent += "❌ " + (e.message || e.error?.message || String(e)) + "\n";
+    });
+    window.addEventListener('unhandledrejection', (e) => {
+      const log = document.getElementById('log');
+      if (log) log.textContent += "❌ Promise rejection: " + (e.reason?.message || String(e.reason)) + "\n";
+    });
+  </script>
+
+  <script type="module" src="./generator.js"></script>
+  <script type="module" src="./model.js"></script>
+  <script type="module" src="./app.js"></script>
 </body>
 </html>
