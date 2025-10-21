@@ -1,201 +1,85 @@
-// generator.js
-// Генерация синтетических изображений 96×96×3 для классов: Leaf / Plastic / Stone
+/* generator.js — безопасные индексы для tf.gather/oneHot и базовые утилиты.
+   Заменяет любые Uint32Array/Float32Array индексы на int32-тензоры.
+   Экспортирует IMG_SIZE (часто требуется). */
 
-export const CLASSES = ["Leaf", "Plastic", "Stone"];
-export const IMG = { W: 96, H: 96 };
-// 👉 Алиас для обратной совместимости (исправляет ошибку импорта)
-export const IMG_SIZE = IMG.W;
+export const IMG_SIZE = 224; // если где-то ожидают этот экспорт — он теперь есть
 
-const off = document.createElement('canvas');
-off.width = IMG.W; off.height = IMG.H;
-const ctx = off.getContext('2d');
-
-const rand  = (a,b) => Math.random()*(b-a)+a;
-const rint  = (a,b) => Math.floor(rand(a,b+1));
-const clamp = (v,a,b)=> Math.max(a, Math.min(b,v));
-
-/* ==================== базовые эффекты / утилиты ==================== */
-function reset(bg="#dbeafe"){ // «уличный» серо-синий фон
-  ctx.fillStyle = bg;
-  ctx.fillRect(0,0,IMG.W,IMG.H);
+// ---------- Индексы и сборка ----------
+/** Превращает JS-массив индексов в int32-тензор. */
+export function int32Indices(indexArray) {
+  // indexArray может быть TypedArray или обычным массивом
+  const arr = Array.from(indexArray, v => v|0);
+  return tf.tensor1d(arr, 'int32');
 }
 
-function addBrightness(v){ // v ∈ [-50..50]
-  if (!v) return;
-  const img = ctx.getImageData(0,0,IMG.W,IMG.H);
-  const d = img.data;
-  for (let i=0;i<d.length;i+=4){
-    d[i]   = clamp(d[i]  + v, 0, 255);
-    d[i+1] = clamp(d[i+1]+ v, 0, 255);
-    d[i+2] = clamp(d[i+2]+ v, 0, 255);
+/** Безопасный gather: indices → int32. */
+export function safeGather(x, indicesArray, axis = 0) {
+  const idx = int32Indices(indicesArray);
+  const y = tf.gather(x, idx, axis);
+  idx.dispose();
+  return y;
+}
+
+/** Сделать последовательные индексы [0..n-1] как int32-тензор. */
+export function arangeInt32(n) {
+  return tf.range(0, n|0, 1, 'int32');
+}
+
+/** Перемешка индексов (Fisher–Yates), возвращает обычный массив. */
+export function shuffledIndices(n, seed = null) {
+  const idx = Array.from({length: n|0}, (_,i)=> i);
+  let r = seedRandom(seed);
+  for (let i=idx.length-1; i>0; i--) {
+    const j = Math.floor(r()* (i+1));
+    [idx[i], idx[j]] = [idx[j], idx[i]];
   }
-  ctx.putImageData(img,0,0);
+  return idx;
 }
 
-function addNoise(level=8){
-  const n = level * 80;
-  for (let i=0;i<n;i++){
-    const x=rint(0,IMG.W-1), y=rint(0,IMG.H-1);
-    const a = Math.random()*0.15;
-    ctx.fillStyle = `rgba(0,0,0,${a})`;
-    ctx.fillRect(x,y,1,1);
+// простой детерминированный генератор случайных чисел (если нужен seed)
+function seedRandom(seed) {
+  let s = (seed == null ? (Math.random()*1e9)|0 : (seed|0)) >>> 0;
+  return function() {
+    // xorshift32
+    s ^= s << 13; s ^= s >>> 17; s ^= s << 5;
+    return ((s >>> 0) / 4294967296);
+  };
+}
+
+// ---------- Пример: подготовка батчей из тензора X (samples x features) ----------
+/** Возвращает итератор батчей: по shuffled индексам и безопасному gather. */
+export function* makeBatches(X, Y = null, batchSize = 32, seed = null) {
+  const n = X.shape[0]|0;
+  const order = shuffledIndices(n, seed);
+  for (let i=0; i<n; i += batchSize) {
+    const slice = order.slice(i, i+batchSize);
+    const xBatch = safeGather(X, slice, 0);
+    const yBatch = Y ? safeGather(Y, slice, 0) : null;
+    yield { xBatch, yBatch, idx: slice };
+    // ВАЖНО: потребитель должен сам делать dispose() после использования батча
   }
 }
 
-function addShadow(intensity=20){
-  if (intensity<=0) return;
-  const gx = rand(10, IMG.W-10), gy = rand(10, IMG.H-10);
-  const outer = Math.max(IMG.W, IMG.H) * rand(0.7, 1.2);
-  const grad = ctx.createRadialGradient(gx, gy, rand(4,12), IMG.W/2, IMG.H/2, outer);
-  grad.addColorStop(0, `rgba(0,0,0,${clamp(intensity/600, 0, 0.25)})`);
-  grad.addColorStop(1, "rgba(0,0,0,0)");
-  ctx.fillStyle = grad;
-  ctx.fillRect(0,0,IMG.W,IMG.H);
+// ---------- Пример: преобразование HTMLImageElement → тензор [1,H,W,3], 0..1 ----------
+export function imageToInputTensor(img, size = IMG_SIZE) {
+  const can = document.createElement('canvas');
+  can.width = size; can.height = size;
+  const g = can.getContext('2d');
+  g.drawImage(img, 0, 0, size, size);
+  const data = g.getImageData(0,0,size,size).data;
+  const arr = new Float32Array(size*size*3);
+  for (let i=0,j=0;i<data.length;i+=4) {
+    arr[j++] = data[i]   / 255;
+    arr[j++] = data[i+1] / 255;
+    arr[j++] = data[i+2] / 255;
+  }
+  return tf.tensor4d(arr, [1, size, size, 3]);
 }
 
-/* ==================== рисовалки классов ==================== */
-function drawLeaf(){
-  const cx = rand(30,66), cy = rand(30,66);
-  const len = rand(24,34), wid = rand(14,22);
-  const ang = rand(0, Math.PI*2);
-
-  ctx.save(); ctx.translate(cx,cy); ctx.rotate(ang);
-
-  // тело листа
-  ctx.fillStyle = `hsl(${rand(90,140)}, ${rint(45,75)}%, ${rint(25,40)}%)`;
-  ctx.beginPath();
-  ctx.moveTo(0, -len);
-  for (let t=-Math.PI/2; t<=Math.PI/2; t+=0.18){
-    const r = wid * (1 - Math.abs(Math.sin(t))*0.35) + rand(-1.5,1.5);
-    ctx.lineTo(Math.cos(t)*r, Math.sin(t)*len);
-  }
-  ctx.closePath(); ctx.fill();
-
-  // прожилки
-  ctx.strokeStyle = "rgba(255,255,255,0.65)";
-  ctx.lineWidth = 1;
-  for (let i=0;i<6;i++){
-    ctx.beginPath();
-    const y = -len*0.9 + i*(len*0.32);
-    ctx.moveTo(0, y);
-    ctx.lineTo(rand(-wid*0.6, -wid*0.25), y + rand(-4,4));
-    ctx.moveTo(0, y);
-    ctx.lineTo(rand( wid*0.25,  wid*0.6),  y + rand(-4,4));
-    ctx.stroke();
-  }
-  ctx.restore();
-}
-
-function drawPlastic(){
-  // цветной многоугольник + блик
-  const n = rint(4,7);
-  const cx = rand(26,70), cy = rand(26,70);
-  const pts = [];
-  for (let i=0;i<n;i++){
-    pts.push([ clamp(cx+rand(-26,26),0,IMG.W), clamp(cy+rand(-26,26),0,IMG.H) ]);
-  }
-  ctx.fillStyle = `hsl(${rint(0,360)}, ${rint(60,90)}%, ${rint(45,70)}%)`;
-  ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
-  for (let i=1;i<pts.length;i++) ctx.lineTo(pts[i][0], pts[i][1]);
-  ctx.closePath(); ctx.fill();
-
-  // блик
-  const gx = clamp(cx + rand(-10,10), 0, IMG.W);
-  const gy = clamp(cy + rand(-10,10), 0, IMG.H);
-  const grad = ctx.createRadialGradient(gx, gy, 2, gx, gy, 28);
-  grad.addColorStop(0, "rgba(255,255,255,0.75)");
-  grad.addColorStop(1, "rgba(255,255,255,0)");
-  ctx.fillStyle = grad; ctx.beginPath(); ctx.arc(gx, gy, 30, 0, Math.PI*2); ctx.fill();
-}
-
-function drawStone(){
-  // неровный «овал» со зерном
-  const cx = rand(30,66), cy = rand(30,66);
-  const rx = rand(16,26), ry = rand(12,22);
-  const rot = rand(0, Math.PI*2);
-
-  ctx.save(); ctx.translate(cx,cy); ctx.rotate(rot);
-
-  ctx.fillStyle = `hsl(${rint(20,50)}, ${rint(10,25)}%, ${rint(30,45)}%)`;
-  ctx.beginPath();
-  for (let a=0; a<Math.PI*2; a+=0.22){
-    const rrx = rx + rand(-3,3), rry = ry + rand(-3,3);
-    const x = Math.cos(a)*rrx, y = Math.sin(a)*rry;
-    if (a===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
-  }
-  ctx.closePath(); ctx.fill();
-
-  // зернистость
-  for (let i=0;i<220;i++){
-    ctx.fillStyle = `rgba(255,255,255,${rand(0.02,0.08)})`;
-    ctx.fillRect(rand(-rx,rx), rand(-ry,ry), 1, 1);
-  }
-  ctx.restore();
-}
-
-/* ==================== конвертация в тензор ==================== */
-function toTensorRGB() {
-  const img = ctx.getImageData(0,0,IMG.W,IMG.H).data;
-  const arr = new Float32Array(IMG.W * IMG.H * 3);
-  for (let i=0,j=0; i<img.length; i+=4){
-    arr[j++] = img[i]   / 255; // R
-    arr[j++] = img[i+1] / 255; // G
-    arr[j++] = img[i+2] / 255; // B
-  }
-  return tf.tensor4d(arr, [1, IMG.W, IMG.H, 3]);
-}
-function oneHot(idx,n){ const a=new Array(n).fill(0); a[idx]=1; return a; }
-
-/* ==================== публичные API ==================== */
-export function generateOne(clsIdx, {brightness=0, shadow=20, noise=8} = {}){
-  // не оборачиваем весь блок в tidy, чтобы вернуть тензоры наружу
-  reset();
-  if (clsIdx===0)      drawLeaf();
-  else if (clsIdx===1) drawPlastic();
-  else                 drawStone();
-
-  addBrightness(brightness);
-  addShadow(shadow);
-  addNoise(noise);
-
-  const x = toTensorRGB();
-  const y = tf.tensor2d([oneHot(clsIdx, CLASSES.length)], [1, CLASSES.length]);
-  return { x, y, preview: off.toDataURL() };
-}
-
-export function generateDataset(perClass=300, opts={brightness:0, shadow:20, noise:8}, testPct=0.2){
-  // В tidy создаём временные тензоры; итоговые train/test возвращаем наружу
-  return tf.tidy(() => {
-    const xs=[], ys=[], previews=[];
-    for (let c=0;c<CLASSES.length;c++){
-      for (let i=0;i<perClass;i++){
-        const {x,y,preview} = generateOne(c, opts);
-        xs.push(x); ys.push(y); previews.push({cls:c, data:preview});
-      }
-    }
-
-    const X = tf.concat(xs,0);
-    const Y = tf.concat(ys,0);
-    xs.forEach(t=>t.dispose()); ys.forEach(t=>t.dispose());
-
-    const N = X.shape[0];
-    // 🔧 FIX: оборачиваем индексы в тензор int32
-    const idxArray = tf.util.createShuffledIndices(N);
-    const idxT = tf.tensor1d(Array.from(idxArray), 'int32');
-
-    const split = Math.floor(N * (1 - testPct));
-    const Xsh = tf.gather(X, idxT);
-    const Ysh = tf.gather(Y, idxT);
-
-    const Xtrain = Xsh.slice([0,0,0,0], [split, IMG.W, IMG.H, 3]);
-    const Ytrain = Ysh.slice([0,0],     [split, CLASSES.length]);
-    const Xtest  = Xsh.slice([split,0,0,0], [N - split, IMG.W, IMG.H, 3]);
-    const Ytest  = Ysh.slice([split,0],     [N - split, CLASSES.length]);
-
-    // временные тензоры будут очищены tidy
-    idxT.dispose();
-    X.dispose(); Y.dispose(); Xsh.dispose(); Ysh.dispose();
-
-    return { Xtrain, Ytrain, Xtest, Ytest, previews };
-  });
+// ---------- Пример: oneHot с безопасными индексами ----------
+export function safeOneHot(classIndexArray, depth) {
+  const idx = int32Indices(classIndexArray);
+  const oh  = tf.oneHot(idx, depth);
+  idx.dispose();
+  return oh;
 }
