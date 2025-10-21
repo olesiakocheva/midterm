@@ -4,6 +4,26 @@ import {
   buildSmallCNN, trainSmall, evaluateSmall, predictProbsSmall,
   buildTransferModel, trainTransfer, evaluateTransfer, predictProbsTransfer
 } from './model.js';
+// --- SAFE TF INIT (добавить в app.js один раз) ---
+async function initTFSafe(logln){
+  try {
+    // Безопасные флаги до ready(): меньше «сложных» шейдеров
+    tf.env().set('WEBGL_VERSION', 1);             // форсим WebGL1 (часто надёжнее)
+    tf.env().set('WEBGL_PACK', false);            // отключаем packed-шейдеры
+    tf.env().set('WEBGL_FORCE_F16_TEXTURES', true); // half-float текстуры
+
+    await tf.setBackend('webgl');
+  } catch(_) { /* игнор */ }
+
+  try {
+    await tf.ready();
+  } catch(e) {
+    // если даже ready спотыкается — уходим на CPU
+    await tf.setBackend('cpu');
+    await tf.ready();
+  }
+  logln?.(`TF backend: ${tf.getBackend()}`);
+}
 
 const ui = {
   perClass: document.getElementById('perClass'),
