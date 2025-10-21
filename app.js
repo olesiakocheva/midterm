@@ -1,3 +1,30 @@
+// --- Safe TF backend helpers ---
+// вызывать ПЕРЕД обучением
+export async function useCpuForTraining() {
+  try {
+    // иногда помогает полностью выключить упаковку шейдеров
+    tf.env().set('WEBGL_PACK', false);
+    tf.env().set('WEBGL_VERSION', 1);
+  } catch {}
+  await tf.setBackend('cpu');
+  await tf.ready();
+  console.log('TF backend (train):', tf.getBackend());
+}
+
+// вызывать ПЕРЕД инференсом/оценкой
+export async function useWebglForInference() {
+  try {
+    tf.env().set('WEBGL_VERSION', 1);
+    tf.env().set('WEBGL_PACK', false); // оставим false — совместимее
+    await tf.setBackend('webgl');
+    await tf.ready();
+  } catch {
+    await tf.setBackend('cpu');
+    await tf.ready();
+  }
+  console.log('TF backend (infer):', tf.getBackend());
+}
+
 // app.js
 import { CLASSES, IMG, generateDataset } from './generator.js';
 import {
